@@ -29,6 +29,8 @@ spec:
       volumeMounts:
         - name: jenkins-docker-cfg
           mountPath: /root/.docker
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
 
   tolerations:
     - key: "gpu"
@@ -58,6 +60,9 @@ spec:
               items:
                 - key: .dockerconfigjson
                   path: config.json
+    - name: docker-sock
+      hostPath:
+        path: /var/run/docker.sock
 """
         }
     }
@@ -100,62 +105,19 @@ spec:
             }
         }
 
-        stage('Verify Image Access') {
-            steps {
-                container('trivy') {
-                    script {
-                        try {
-                            // Verify Docker credentials
-                            sh 'ls -la /root/.docker/'
-                            
-                            // Try to pull the image to verify access
-                            sh """
-                            docker pull ${DOCKER_IMAGE}:${BUILD_NUMBER} || {
-                                echo "Failed to pull image. Checking Docker configuration..."
-                                cat /root/.docker/config.json
-                                exit 1
-                            }
-                            """
-                            
-                            // List available images
-                            sh 'docker images'
-                            
-                        } catch (Exception e) {
-                            echo "Error verifying image access: ${e.message}"
-                            currentBuild.result = 'FAILURE'
-                            error """
-                            Failed to verify Docker image access!
-                            Error: ${e.message}
-                            
-                            Please check:
-                            1. Docker credentials are properly configured
-                            2. The image was successfully pushed
-                            3. The Trivy container has proper permissions
-                            """
-                        }
-                    }
-                }
-            }
-        }
-
         stage('Scan Docker Image') {
             steps {
                 container('trivy') {
                     script {
                         try {
-                            // First, try to list the image
-                            sh """
-                            echo "Available images:"
-                            docker images | grep ${DOCKER_IMAGE}
-                            """
-                            
-                            // Run Trivy scan with debug output
+                            // Run Trivy scan directly on the remote image
                             def scanOutput = sh(
                                 script: """
                                 trivy image --debug \
                                           --severity ${TRIVY_SEVERITY} \
                                           --format ${TRIVY_FORMAT} \
                                           --timeout ${TRIVY_TIMEOUT} \
+                                          --skip-db-update \
                                           ${DOCKER_IMAGE}:${BUILD_NUMBER}
                                 """,
                                 returnStdout: true
@@ -170,6 +132,7 @@ spec:
                                           --severity CRITICAL,HIGH,MEDIUM,LOW \
                                           --format ${TRIVY_FORMAT} \
                                           --timeout ${TRIVY_TIMEOUT} \
+                                          --skip-db-update \
                                           ${DOCKER_IMAGE}:${BUILD_NUMBER}
                                 """,
                                 returnStdout: true
