@@ -21,13 +21,6 @@ spec:
         - name: jenkins-docker-cfg
           mountPath: /kaniko/.docker
 
-    - name: kubectl
-      image: lachlanevenson/k8s-kubectl
-      imagePullPolicy: IfNotPresent
-      command:
-        - /bin/sh
-      tty: true
-
     - name: trivy
       image: aquasec/trivy:latest
       command:
@@ -120,41 +113,6 @@ spec:
                             currentBuild.result = 'FAILURE'
                             error('Docker image scan failed due to critical/high vulnerabilities')
                         }
-                    }
-                }
-            }
-        }
-
-        stage('Trigger ArgoCD') {
-            when {
-                expression { currentBuild.result == 'SUCCESS' }
-            }
-            steps {
-                container('kubectl') {
-                    withCredentials([usernamePassword(credentialsId: 'CodeCommit-secret', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
-                        sh '''
-                        set -e
-                        apk update
-                        apk add git
-
-                        # Clone the GitOps repo from CodeCommit
-                        git config --global credential.helper '!f() { echo "username=${GIT_USER}"; echo "password=${GIT_PASS}"; }; f'
-                        git clone -b master https://git-codecommit.us-east-1.amazonaws.com/v1/repos/argocd-test
-                        echo "==== List cloned files ===="
-                        ls -la
-
-                        echo "Need to go inside argocd-test/prod"
-                        cd argocd-test/prod
-
-                        # Update the image tag
-                        sed -i "s|image: .*|image: ${DOCKER_IMAGE}:${BUILD_NUMBER}|" deploy.yaml
-
-                        # Commit and push the change
-                        git config user.name "jenkins"
-                        git config user.email "jenkins@example.com"
-                        git commit -am "Update image to ${BUILD_NUMBER}, app commit ${APP_COMMIT}"
-                        git push
-                        '''
                     }
                 }
             }
