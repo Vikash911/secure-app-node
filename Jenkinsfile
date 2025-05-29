@@ -64,7 +64,7 @@ spec:
         DOCKER_IMAGE = '992382633140.dkr.ecr.us-east-1.amazonaws.com/argo'
         TRIVY_SEVERITY = 'CRITICAL'
         TRIVY_EXIT_CODE = '1'
-        TRIVY_FORMAT = 'json'
+        TRIVY_FORMAT = 'table'
         TRIVY_TIMEOUT = '5m'
     }
 
@@ -102,53 +102,62 @@ spec:
                 container('trivy') {
                     script {
                         try {
-                            sh """
-                            trivy image --severity CRITICAL,HIGH,MEDIUM,LOW \
-                                      --format ${TRIVY_FORMAT} \
-                                      --timeout ${TRIVY_TIMEOUT} \
-                                      --output trivy-full-report.json \
-                                      ${DOCKER_IMAGE}:${BUILD_NUMBER}
-                            """
+                            def scanOutput = sh(
+                                script: """
+                                trivy image --severity ${TRIVY_SEVERITY} \
+                                          --format ${TRIVY_FORMAT} \
+                                          --timeout ${TRIVY_TIMEOUT} \
+                                          ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                                """,
+                                returnStdout: true
+                            ).trim()
                             
-                            sh """
-                            trivy image --severity ${TRIVY_SEVERITY} \
-                                      --exit-code ${TRIVY_EXIT_CODE} \
-                                      --format ${TRIVY_FORMAT} \
-                                      --timeout ${TRIVY_TIMEOUT} \
-                                      --output trivy-results.json \
-                                      ${DOCKER_IMAGE}:${BUILD_NUMBER}
-                            """
+                            writeFile file: 'trivy-results.txt', text: scanOutput
                             
-                            archiveArtifacts artifacts: 'trivy-*-report.json', allowEmptyArchive: true
+                            def fullScanOutput = sh(
+                                script: """
+                                trivy image --severity CRITICAL,HIGH,MEDIUM,LOW \
+                                          --format ${TRIVY_FORMAT} \
+                                          --timeout ${TRIVY_TIMEOUT} \
+                                          ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                                """,
+                                returnStdout: true
+                            ).trim()
+                            
+                            writeFile file: 'trivy-full-report.txt', text: fullScanOutput
+                            
+                            archiveArtifacts artifacts: 'trivy-*-report.txt', allowEmptyArchive: true
+                            
+                            if (scanOutput.contains('CRITICAL')) {
+                                error """
+                                Critical vulnerabilities found in the Docker image!
+                                
+                                Full vulnerability report:
+                                ${fullScanOutput}
+                                
+                                Critical vulnerabilities that caused the failure:
+                                ${scanOutput}
+                                
+                                To fix these issues:
+                                1. Review the vulnerabilities in the reports
+                                2. Update your Dockerfile to use a more recent base image
+                                3. Remove unnecessary packages
+                                4. Update any outdated packages
+                                """
+                            }
                             
                         } catch (Exception e) {
-                            echo "Critical vulnerabilities found in the Docker image!"
-                            
-                            def fullReport = readFile('trivy-full-report.json')
-                            echo "Full vulnerability report:"
-                            echo fullReport
-                            
-                            def criticalReport = readFile('trivy-results.json')
-                            echo "\nCritical vulnerabilities that caused the failure:"
-                            echo criticalReport
-                            
-                            archiveArtifacts artifacts: 'trivy-*-report.json', allowEmptyArchive: true
-                            
-                            def errorMsg = """
-                            Docker image scan failed due to critical vulnerabilities.
-                            Please check the archived Trivy reports for details:
-                            - trivy-full-report.json: Contains all vulnerabilities
-                            - trivy-results.json: Contains critical vulnerabilities
-                            
-                            To fix these issues:
-                            1. Review the vulnerabilities in the reports
-                            2. Update your Dockerfile to use a more recent base image
-                            3. Remove unnecessary packages
-                            4. Update any outdated packages
-                            """
-                            
+                            echo "Error during Trivy scan: ${e.message}"
                             currentBuild.result = 'FAILURE'
-                            error(errorMsg)
+                            error """
+                            Docker image scan failed!
+                            Error: ${e.message}
+                            
+                            Please check:
+                            1. The Docker image was built successfully
+                            2. The image is accessible to Trivy
+                            3. The Trivy container has proper permissions
+                            """
                         }
                     }
                 }
@@ -159,8 +168,8 @@ spec:
     post {
         always {
             script {
-                if (fileExists('trivy-*-report.json')) {
-                    archiveArtifacts artifacts: 'trivy-*-report.json', allowEmptyArchive: true
+                if (fileExists('trivy-*-report.txt')) {
+                    archiveArtifacts artifacts: 'trivy-*-report.txt', allowEmptyArchive: true
                 }
             }
             cleanWs()
@@ -169,8 +178,7 @@ spec:
             echo 'Pipeline completed successfully!'
         }
         failure {
-            echo 'Pipeline failed! Check the archived Trivy reports for vulnerability details.'
-            echo 'The reports are available in the Jenkins build artifacts.'
+            echo 'Pipeline failed! Check the build logs and archived Trivy reports for details.'
         }
     }
 }
