@@ -21,16 +21,18 @@ spec:
         - name: jenkins-docker-cfg
           mountPath: /kaniko/.docker
 
+    - name: kubectl
+      image: lachlanevenson/k8s-kubectl
+      imagePullPolicy: IfNotPresent
+      command:
+        - /bin/sh
+      tty: true
+
     - name: trivy
       image: aquasec/trivy:latest
       command:
         - cat
       tty: true
-      volumeMounts:
-        - name: jenkins-docker-cfg
-          mountPath: /root/.docker
-        - name: docker-sock
-          mountPath: /var/run/docker.sock
 
   tolerations:
     - key: "gpu"
@@ -60,9 +62,6 @@ spec:
               items:
                 - key: .dockerconfigjson
                   path: config.json
-    - name: docker-sock
-      hostPath:
-        path: /var/run/docker.sock
 """
         }
     }
@@ -70,10 +69,8 @@ spec:
     environment {
         APP_COMMIT = ''
         DOCKER_IMAGE = '992382633140.dkr.ecr.us-east-1.amazonaws.com/argo'
-        TRIVY_SEVERITY = 'CRITICAL'
+        TRIVY_SEVERITY = 'CRITICAL,HIGH'
         TRIVY_EXIT_CODE = '1'
-        TRIVY_FORMAT = 'table'
-        TRIVY_TIMEOUT = '5m'
     }
 
     stages {
@@ -110,70 +107,54 @@ spec:
                 container('trivy') {
                     script {
                         try {
-                            // Run Trivy scan directly on the remote image
-                            def scanOutput = sh(
-                                script: """
-                                trivy image --debug \
-                                          --severity ${TRIVY_SEVERITY} \
-                                          --format ${TRIVY_FORMAT} \
-                                          --timeout ${TRIVY_TIMEOUT} \
-                                          --skip-db-update \
-                                          ${DOCKER_IMAGE}:${BUILD_NUMBER}
-                                """,
-                                returnStdout: true
-                            ).trim()
-                            
-                            writeFile file: 'trivy-results.txt', text: scanOutput
-                            
-                            // Run full scan for reference
-                            def fullScanOutput = sh(
-                                script: """
-                                trivy image --debug \
-                                          --severity CRITICAL,HIGH,MEDIUM,LOW \
-                                          --format ${TRIVY_FORMAT} \
-                                          --timeout ${TRIVY_TIMEOUT} \
-                                          --skip-db-update \
-                                          ${DOCKER_IMAGE}:${BUILD_NUMBER}
-                                """,
-                                returnStdout: true
-                            ).trim()
-                            
-                            writeFile file: 'trivy-full-report.txt', text: fullScanOutput
-                            
-                            archiveArtifacts artifacts: 'trivy-*-report.txt', allowEmptyArchive: true
-                            
-                            if (scanOutput.contains('CRITICAL')) {
-                                error """
-                                Critical vulnerabilities found in the Docker image!
-                                
-                                Full vulnerability report:
-                                ${fullScanOutput}
-                                
-                                Critical vulnerabilities that caused the failure:
-                                ${scanOutput}
-                                
-                                To fix these issues:
-                                1. Review the vulnerabilities in the reports
-                                2. Update your Dockerfile to use a more recent base image
-                                3. Remove unnecessary packages
-                                4. Update any outdated packages
-                                """
-                            }
-                            
-                        } catch (Exception e) {
-                            echo "Error during Trivy scan: ${e.message}"
-                            currentBuild.result = 'FAILURE'
-                            error """
-                            Docker image scan failed!
-                            Error: ${e.message}
-                            
-                            Please check:
-                            1. The Docker image was built successfully
-                            2. The image is accessible to Trivy
-                            3. The Trivy container has proper permissions
-                            4. Docker credentials are properly configured
+                            sh """
+                            trivy image --severity ${TRIVY_SEVERITY} \
+                                      --exit-code ${TRIVY_EXIT_CODE} \
+                                      --format table \
+                                      --output trivy-results.txt \
+                                      ${DOCKER_IMAGE}:${BUILD_NUMBER}
                             """
+                        } catch (Exception e) {
+                            echo "Critical or High severity vulnerabilities found!"
+                            sh 'cat trivy-results.txt'
+                            currentBuild.result = 'FAILURE'
+                            error('Docker image scan failed due to critical/high vulnerabilities')
                         }
+                    }
+                }
+            }
+        }
+
+        stage('Trigger ArgoCD') {
+            when {
+                expression { currentBuild.result == 'SUCCESS' }
+            }
+            steps {
+                container('kubectl') {
+                    withCredentials([usernamePassword(credentialsId: 'CodeCommit-secret', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
+                        sh '''
+                        set -e
+                        apk update
+                        apk add git
+
+                        # Clone the GitOps repo from CodeCommit
+                        git config --global credential.helper '!f() { echo "username=${GIT_USER}"; echo "password=${GIT_PASS}"; }; f'
+                        git clone -b master https://git-codecommit.us-east-1.amazonaws.com/v1/repos/argocd-test
+                        echo "==== List cloned files ===="
+                        ls -la
+
+                        echo "Need to go inside argocd-test/prod"
+                        cd argocd-test/prod
+
+                        # Update the image tag
+                        sed -i "s|image: .*|image: ${DOCKER_IMAGE}:${BUILD_NUMBER}|" deploy.yaml
+
+                        # Commit and push the change
+                        git config user.name "jenkins"
+                        git config user.email "jenkins@example.com"
+                        git commit -am "Update image to ${BUILD_NUMBER}, app commit ${APP_COMMIT}"
+                        git push
+                        '''
                     }
                 }
             }
@@ -183,8 +164,8 @@ spec:
     post {
         always {
             script {
-                if (fileExists('trivy-*-report.txt')) {
-                    archiveArtifacts artifacts: 'trivy-*-report.txt', allowEmptyArchive: true
+                if (fileExists('trivy-results.txt')) {
+                    archiveArtifacts artifacts: 'trivy-results.txt', allowEmptyArchive: true
                 }
             }
             cleanWs()
@@ -193,7 +174,7 @@ spec:
             echo 'Pipeline completed successfully!'
         }
         failure {
-            echo 'Pipeline failed! Check the build logs and archived Trivy reports for details.'
+            echo 'Pipeline failed! Check the logs for details.'
         }
     }
 }
