@@ -26,6 +26,9 @@ spec:
       command:
         - cat
       tty: true
+      volumeMounts:
+        - name: jenkins-docker-cfg
+          mountPath: /root/.docker
 
   tolerations:
     - key: "gpu"
@@ -97,14 +100,60 @@ spec:
             }
         }
 
+        stage('Verify Image Access') {
+            steps {
+                container('trivy') {
+                    script {
+                        try {
+                            // Verify Docker credentials
+                            sh 'ls -la /root/.docker/'
+                            
+                            // Try to pull the image to verify access
+                            sh """
+                            docker pull ${DOCKER_IMAGE}:${BUILD_NUMBER} || {
+                                echo "Failed to pull image. Checking Docker configuration..."
+                                cat /root/.docker/config.json
+                                exit 1
+                            }
+                            """
+                            
+                            // List available images
+                            sh 'docker images'
+                            
+                        } catch (Exception e) {
+                            echo "Error verifying image access: ${e.message}"
+                            currentBuild.result = 'FAILURE'
+                            error """
+                            Failed to verify Docker image access!
+                            Error: ${e.message}
+                            
+                            Please check:
+                            1. Docker credentials are properly configured
+                            2. The image was successfully pushed
+                            3. The Trivy container has proper permissions
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
         stage('Scan Docker Image') {
             steps {
                 container('trivy') {
                     script {
                         try {
+                            // First, try to list the image
+                            sh """
+                            echo "Available images:"
+                            docker images | grep ${DOCKER_IMAGE}
+                            """
+                            
+                            // Run Trivy scan with debug output
                             def scanOutput = sh(
                                 script: """
-                                trivy image --severity ${TRIVY_SEVERITY} \
+                                trivy image --debug \
+                                          --severity ${TRIVY_SEVERITY} \
                                           --format ${TRIVY_FORMAT} \
                                           --timeout ${TRIVY_TIMEOUT} \
                                           ${DOCKER_IMAGE}:${BUILD_NUMBER}
@@ -114,9 +163,11 @@ spec:
                             
                             writeFile file: 'trivy-results.txt', text: scanOutput
                             
+                            // Run full scan for reference
                             def fullScanOutput = sh(
                                 script: """
-                                trivy image --severity CRITICAL,HIGH,MEDIUM,LOW \
+                                trivy image --debug \
+                                          --severity CRITICAL,HIGH,MEDIUM,LOW \
                                           --format ${TRIVY_FORMAT} \
                                           --timeout ${TRIVY_TIMEOUT} \
                                           ${DOCKER_IMAGE}:${BUILD_NUMBER}
@@ -157,6 +208,7 @@ spec:
                             1. The Docker image was built successfully
                             2. The image is accessible to Trivy
                             3. The Trivy container has proper permissions
+                            4. Docker credentials are properly configured
                             """
                         }
                     }
