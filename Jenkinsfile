@@ -62,8 +62,10 @@ spec:
     environment {
         APP_COMMIT = ''
         DOCKER_IMAGE = '992382633140.dkr.ecr.us-east-1.amazonaws.com/argo'
-        TRIVY_SEVERITY = 'CRITICAL,HIGH'
+        TRIVY_SEVERITY = 'CRITICAL'
         TRIVY_EXIT_CODE = '1'
+        TRIVY_FORMAT = 'table'
+        TRIVY_TIMEOUT = '5m'
     }
 
     stages {
@@ -101,17 +103,35 @@ spec:
                     script {
                         try {
                             sh """
+                            trivy image --severity CRITICAL,HIGH,MEDIUM,LOW \
+                                      --format ${TRIVY_FORMAT} \
+                                      --timeout ${TRIVY_TIMEOUT} \
+                                      --output trivy-full-report.txt \
+                                      ${DOCKER_IMAGE}:${BUILD_NUMBER}
+                            """
+                            
+                            sh """
                             trivy image --severity ${TRIVY_SEVERITY} \
                                       --exit-code ${TRIVY_EXIT_CODE} \
-                                      --format table \
+                                      --format ${TRIVY_FORMAT} \
+                                      --timeout ${TRIVY_TIMEOUT} \
                                       --output trivy-results.txt \
                                       ${DOCKER_IMAGE}:${BUILD_NUMBER}
                             """
+                            
+                            archiveArtifacts artifacts: 'trivy-*-report.txt', allowEmptyArchive: true
+                            
                         } catch (Exception e) {
-                            echo "Critical or High severity vulnerabilities found!"
+                            echo "Critical vulnerabilities found in the Docker image!"
+                            echo "Full vulnerability report:"
+                            sh 'cat trivy-full-report.txt'
+                            echo "\nCritical vulnerabilities that caused the failure:"
                             sh 'cat trivy-results.txt'
+                            
+                            archiveArtifacts artifacts: 'trivy-*-report.txt', allowEmptyArchive: true
+                            
                             currentBuild.result = 'FAILURE'
-                            error('Docker image scan failed due to critical/high vulnerabilities')
+                            error('Docker image scan failed due to critical vulnerabilities. Check the archived reports for details.')
                         }
                     }
                 }
@@ -122,8 +142,8 @@ spec:
     post {
         always {
             script {
-                if (fileExists('trivy-results.txt')) {
-                    archiveArtifacts artifacts: 'trivy-results.txt', allowEmptyArchive: true
+                if (fileExists('trivy-*-report.txt')) {
+                    archiveArtifacts artifacts: 'trivy-*-report.txt', allowEmptyArchive: true
                 }
             }
             cleanWs()
@@ -132,7 +152,7 @@ spec:
             echo 'Pipeline completed successfully!'
         }
         failure {
-            echo 'Pipeline failed! Check the logs for details.'
+            echo 'Pipeline failed! Check the archived Trivy reports for vulnerability details.'
         }
     }
-} 
+}
